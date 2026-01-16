@@ -1,6 +1,6 @@
 # vbase-rce
 
-A lightweight Remote Code Execution (RCE) engine, compatible with the [Piston API v2](https://piston.readthedocs.io/en/latest/api-v2/).
+A lightweight Remote Code Execution (RCE) engine for VBase
 
 ## Features
 
