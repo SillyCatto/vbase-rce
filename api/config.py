@@ -100,16 +100,6 @@ RUNTIMES: List[RuntimeConfig] = [
         run_cmd="/tmp/program {args}",
     ),
     RuntimeConfig(
-        language="go",
-        version="1.22.0",
-        aliases=["golang"],
-        image="vbase-go-runner",
-        extension=".go",
-        compiled=True,
-        compile_cmd="go build -o /tmp/program {file}",
-        run_cmd="/tmp/program {args}",
-    ),
-    RuntimeConfig(
         language="java",
         version="21.0.0",
         aliases=["jdk"],

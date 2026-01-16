@@ -137,7 +137,11 @@ class CodeExecutor:
                 "security_opt": self.security.security_opt,
                 "read_only": self.security.read_only_rootfs,
                 # Tmpfs for writable directories - exec needed for compiled binaries
-                "tmpfs": {"/tmp": f"size={self.security.tmpfs_size},mode=1777,exec"},
+                # Also include home directory for Go cache and other runtime caches
+                "tmpfs": {
+                    "/tmp": f"size={self.security.tmpfs_size},mode=1777,exec",
+                    "/home/runner": f"size={self.security.tmpfs_size},mode=1777,exec",
+                },
             }
 
             container = self.client.containers.create(**container_config)

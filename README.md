@@ -5,7 +5,7 @@ A lightweight Remote Code Execution (RCE) engine, compatible with the [Piston AP
 ## Features
 
 - **Piston API v2 Compatible**: Drop-in replacement for Piston API
-- **Multiple Language Support**: Python, JavaScript (Node.js), C, C++, Go, Java
+- **Multiple Language Support**: Python, JavaScript (Node.js), C, C++, Java
 - **Lightweight**: Alpine-based container images
 - **Secure**: Memory limits, CPU limits, network isolation, read-only filesystem, process limits
 - **Simple Deployment**: Single docker-compose command
@@ -18,7 +18,6 @@ A lightweight Remote Code Execution (RCE) engine, compatible with the [Piston AP
 | JavaScript | 20.0.0  | js, node, node-js              |
 | C          | 13.2.0  | gcc                            |
 | C++        | 13.2.0  | cpp, g++, cplusplus            |
-| Go         | 1.22.0  | golang                         |
 | Java       | 21.0.0  | jdk                            |
 
 ## Quick Start
@@ -150,7 +149,6 @@ vbase-rce/
 │   ├── node/Dockerfile
 │   ├── c/Dockerfile
 │   ├── cpp/Dockerfile
-│   ├── go/Dockerfile
 │   └── java/Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -181,7 +179,6 @@ docker build -t vbase-python-runner ./runners/python
 docker build -t vbase-node-runner ./runners/node
 docker build -t vbase-c-runner ./runners/c
 docker build -t vbase-cpp-runner ./runners/cpp
-docker build -t vbase-go-runner ./runners/go
 docker build -t vbase-java-runner ./runners/java
 ```
 

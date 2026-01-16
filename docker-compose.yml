@@ -18,7 +18,6 @@ services:
       - node-runner
       - c-runner
       - cpp-runner
-      - go-runner
       - java-runner
 
   # Runner images (built only, not run as services)
@@ -41,11 +40,6 @@ services:
     build: ./runners/cpp
     image: vbase-cpp-runner
     command: ["echo", "C++ runner image built"]
-
-  go-runner:
-    build: ./runners/go
-    image: vbase-go-runner
-    command: ["echo", "Go runner image built"]
 
   java-runner:
     build: ./runners/java
