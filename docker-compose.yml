@@ -1,0 +1,53 @@
+services:
+  # Main API server
+  rce-api:
+    build: ./api
+    container_name: vbase-rce-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount Docker socket to control containers on host
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount temp directory for code files (shared with runner containers)
+      - /tmp:/tmp
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - python-runner
+      - node-runner
+      - c-runner
+      - cpp-runner
+      - go-runner
+      - java-runner
+
+  # Runner images (built only, not run as services)
+  python-runner:
+    build: ./runners/python
+    image: vbase-python-runner
+    command: ["echo", "Python runner image built"]
+
+  node-runner:
+    build: ./runners/node
+    image: vbase-node-runner
+    command: ["echo", "Node runner image built"]
+
+  c-runner:
+    build: ./runners/c
+    image: vbase-c-runner
+    command: ["echo", "C runner image built"]
+
+  cpp-runner:
+    build: ./runners/cpp
+    image: vbase-cpp-runner
+    command: ["echo", "C++ runner image built"]
+
+  go-runner:
+    build: ./runners/go
+    image: vbase-go-runner
+    command: ["echo", "Go runner image built"]
+
+  java-runner:
+    build: ./runners/java
+    image: vbase-java-runner
+    command: ["echo", "Java runner image built"]
