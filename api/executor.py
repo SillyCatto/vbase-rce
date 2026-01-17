@@ -3,16 +3,21 @@ Code execution engine for vbase-rce
 Handles container lifecycle, code execution, and output capture
 """
 
+import asyncio
 import base64
 import os
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 
 import docker
 import docker.errors
 from config import DEFAULT_SECURITY, RuntimeConfig, get_runtime_by_language
 from models import ExecuteRequest, ExecuteResponse, File, FileEncoding, RunResult
+
+# Maximum concurrent code executions (configurable via environment)
+MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
 
 
 class ExecutionError(Exception):
@@ -32,6 +37,10 @@ class CodeExecutor:
     def __init__(self, docker_client: Optional[docker.DockerClient] = None):
         self.client = docker_client or docker.from_env()
         self.security = DEFAULT_SECURITY
+        # Limit concurrent executions to prevent resource exhaustion
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+        # Thread pool for running blocking Docker operations
+        self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS)
 
     def _decode_file_content(self, file: File) -> str:
         """Decode file content based on encoding"""
@@ -262,7 +271,19 @@ class CodeExecutor:
 
     async def execute(self, request: ExecuteRequest) -> ExecuteResponse:
         """
-        Execute code and return Piston-compatible response
+        Execute code and return Piston-compatible response.
+        Uses a semaphore to limit concurrent executions.
+        """
+        async with self.semaphore:
+            # Run the blocking execution in a thread pool
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.executor, self._execute_sync, request
+            )
+
+    def _execute_sync(self, request: ExecuteRequest) -> ExecuteResponse:
+        """
+        Synchronous execution logic (runs in thread pool)
         """
         # Get runtime configuration
         runtime = get_runtime_by_language(request.language)
