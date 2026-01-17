@@ -14,6 +14,8 @@ services:
       # Container operations (required for code execution)
       - CONTAINERS=1
       - IMAGES=1
+      # Allow volume mounts for sharing code files with runner containers
+      - VOLUMES=1
       # Deny dangerous operations
       - AUTH=0
       - SECRETS=0
@@ -32,7 +34,6 @@ services:
       - SWARM=0
       - SYSTEM=0
       - TASKS=0
-      - VOLUMES=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
@@ -53,8 +54,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Mount temp directory for code files (shared with runner containers)
-      - /tmp:/tmp
+      # Named volume for sharing code files with runner containers
+      # This works correctly in containerized environments (Azure, etc.)
+      - vbase-code-files:/tmp/vbase-rce
+    user: "0:0"  # Run initial setup as root, then drop privileges in entrypoint
     environment:
       # Connect to Docker through the proxy instead of direct socket
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
@@ -62,6 +65,12 @@ services:
       - VBASE_API_KEY=${VBASE_API_KEY:-}
       # Maximum concurrent code executions (default: 5)
       - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-5}
+      # Base path for code files (must match volume mount)
+      - CODE_FILES_PATH=/tmp/vbase-rce
+      # Docker volume name for code files (must match volumes section with project prefix)
+      - CODE_FILES_VOLUME=vbase-rce_vbase-code-files
+      # User to run the app as (after volume setup)
+      - APP_USER=appuser
     restart: unless-stopped
     depends_on:
       - docker-socket-proxy
@@ -103,3 +112,8 @@ services:
 networks:
   docker-proxy-net:
     driver: bridge
+
+# Named volume for sharing code files between API and runner containers
+volumes:
+  vbase-code-files:
+    driver: local

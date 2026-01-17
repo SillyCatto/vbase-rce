@@ -124,6 +124,84 @@ Execute code in an isolated container.
 }
 ```
 
+## Architecture
+
+### How Code Execution Works
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                         Docker Host                            │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│  ┌──────────────────┐        ┌──────────────────────────────┐  │
+│  │  Docker Socket   │◄──────►│   docker-socket-proxy        │  │
+│  │  /var/run/...    │   RO   │   (restricted API access)    │  │
+│  └──────────────────┘        └──────────────┬───────────────┘  │
+│                                             │ TCP :2375        │
+│                                             ▼                  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                    rce-api (FastAPI)                     │  │
+│  │                    Runs as: appuser (UID 1000)           │  │
+│  │                                                          │  │
+│  │  1. Receives code execution request                      │  │
+│  │  2. Writes code to shared volume                         │  │
+│  │  3. Creates runner container via socket proxy            │  │
+│  │  4. Waits for execution, returns output                  │  │
+│  │  5. Cleans up temp files                                 │  │
+│  └────────────────────────┬─────────────────────────────────┘  │
+│                           │                                    │
+│                           ▼                                    │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              Named Volume: vbase-code-files              │  │
+│  │              (shared between API and runners)            │  │
+│  └────────────────────────┬─────────────────────────────────┘  │
+│                           │ Read-only mount                    │
+│                           ▼                                    │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                 Runner Container                         │  │
+│  │                 (python/node/c/cpp/java)                 │  │
+│  │                 Runs as: runner (UID 1001)               │  │
+│  │                                                          │  │
+│  │  - Network disabled                                      │  │
+│  │  - Read-only rootfs + tmpfs                              │  │
+│  │  - Memory/CPU/PID limits                                 │  │
+│  │  - All capabilities dropped                              │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Volume Sharing Mechanism
+
+Code files are shared between the API container and runner containers using a Docker named volume:
+
+1. **API Container** mounts `vbase-code-files` at `/tmp/vbase-rce`
+2. **API** writes code to `/tmp/vbase-rce/exec-{random}/main.{ext}`
+3. **Files are made world-readable** (`chmod 755` dir, `chmod 644` files)
+4. **Runner Container** mounts same volume at `/code-volume` (read-only)
+5. **Runner** executes `/code-volume/exec-{random}/main.{ext}`
+6. **Cleanup**: Temp directory deleted after execution
+
+This approach works in containerized environments (Azure Container Apps, AWS ECS, etc.) where bind mounts to host paths are not available.
+
+### Privilege Dropping (API Container)
+
+The API container uses a two-stage startup:
+
+1. **Stage 1 (root)**: `entrypoint.sh` runs as root to fix volume permissions
+2. **Stage 2 (appuser)**: Uses `gosu` to drop to `appuser` (UID 1000) and run uvicorn
+
+```bash
+# entrypoint.sh flow:
+if [ "$(id -u)" = "0" ]; then
+    chown -R appuser:appuser /tmp/vbase-rce
+    exec gosu appuser "$0" "$@"  # Re-exec as appuser
+fi
+exec "$@"  # Run uvicorn
+```
+
+---
+
 ## Security Architecture
 
 vbase-rce implements defense-in-depth with multiple security layers to safely execute untrusted code.
@@ -167,12 +245,13 @@ Instead of mounting the Docker socket directly (which grants root-level host acc
 # Only these Docker API endpoints are allowed:
 CONTAINERS=1  # Create/manage containers
 IMAGES=1      # List images
+VOLUMES=1     # Mount shared code volume
 POST=1        # Required for container creation
 VERSION=1     # API version check
 PING=1        # Health check
 
 # Everything else is blocked:
-EXEC=0, VOLUMES=0, NETWORKS=0, BUILD=0, etc.
+EXEC=0, NETWORKS=0, BUILD=0, SWARM=0, etc.
 ```
 
 **Defends against**: If the API is compromised, attackers cannot:
@@ -305,6 +384,9 @@ class SecurityConfig:
 | `VBASE_API_KEY` | *(empty)* | API key for authentication (empty = disabled) |
 | `MAX_CONCURRENT_JOBS` | `5` | Maximum simultaneous code executions |
 | `DOCKER_HOST` | `tcp://docker-socket-proxy:2375` | Docker API endpoint |
+| `CODE_FILES_PATH` | `/tmp/vbase-rce` | Directory for temporary code files (must match volume mount) |
+| `CODE_FILES_VOLUME` | `vbase-rce_vbase-code-files` | Docker volume name for code sharing |
+| `APP_USER` | `appuser` | User to run the API as (after privilege drop) |
 
 ## Project Structure
 
@@ -312,10 +394,11 @@ class SecurityConfig:
 vbase-rce/
 ├── api/
 │   ├── Dockerfile       # API server container
+│   ├── entrypoint.sh    # Privilege drop script (gosu)
 │   ├── main.py          # FastAPI application
 │   ├── models.py        # Pydantic models
-│   ├── config.py        # Runtime configuration
-│   ├── executor.py      # Code execution engine
+│   ├── config.py        # Runtime & security configuration
+│   ├── executor.py      # Code execution engine (volume handling)
 │   └── requirements.txt # Python dependencies
 ├── runners/
 │   ├── python/Dockerfile
@@ -355,9 +438,11 @@ docker build -t vbase-cpp-runner ./runners/cpp
 docker build -t vbase-java-runner ./runners/java
 ```
 
-## Deployment (DigitalOcean)
+## Deployment
 
-1. Create a Droplet with Docker pre-installed
+### DigitalOcean / Any VPS
+
+1. Create a Droplet/VPS with Docker pre-installed
 2. Clone this repository
 3. Configure environment variables
 4. Run `docker-compose up --build -d`
@@ -365,14 +450,14 @@ docker build -t vbase-java-runner ./runners/java
 6. (Optional) Set up a reverse proxy with HTTPS
 
 ```bash
-# On your DigitalOcean droplet
+# On your server
 git clone <your-repo-url> vbase-rce
 cd vbase-rce
 
 # Generate and set API key
 echo "VBASE_API_KEY=$(openssl rand -hex 32)" >> .env
 
-# Optionally adjust concurrent jobs based on droplet size
+# Optionally adjust concurrent jobs based on server resources
 echo "MAX_CONCURRENT_JOBS=5" >> .env
 
 # Start the service
@@ -383,6 +468,34 @@ curl -H "X-API-Key: $(grep VBASE_API_KEY .env | cut -d= -f2)" \
   http://localhost:8000/api/v2/runtimes
 ```
 
+### Azure Container Apps / AWS ECS / GCP Cloud Run
+
+For containerized cloud platforms:
+
+1. **Build and push images** to a container registry (ACR, ECR, GCR)
+2. **Deploy with docker-compose** or convert to platform-specific config
+3. **Important**: The named volume `vbase-code-files` must be available
+
+```bash
+# Push images to registry
+docker-compose build
+docker tag vbase-rce-rce-api:latest <registry>/vbase-rce-api:latest
+docker tag vbase-python-runner:latest <registry>/vbase-python-runner:latest
+# ... tag other runners
+docker push <registry>/vbase-rce-api:latest
+# ... push other images
+```
+
+**Key environment variables for cloud deployment:**
+```bash
+VBASE_API_KEY=<your-secure-key>
+CODE_FILES_PATH=/tmp/vbase-rce
+CODE_FILES_VOLUME=<your-volume-name>  # Adjust to match cloud volume naming
+DOCKER_HOST=tcp://docker-socket-proxy:2375
+```
+
+> **Note**: The volume name (`CODE_FILES_VOLUME`) may need adjustment based on how your cloud platform names volumes. Check the actual volume name after deployment.
+
 ### Production Recommendations
 
 - **Always set `VBASE_API_KEY`** in production
@@ -390,6 +503,212 @@ curl -H "X-API-Key: $(grep VBASE_API_KEY .env | cut -d= -f2)" \
 - Set `MAX_CONCURRENT_JOBS` based on your droplet's resources (1-2 per CPU core)
 - Monitor with `docker-compose logs -f rce-api`
 - Consider rate limiting at the reverse proxy level
+
+---
+
+## Diagrams
+
+### System Architecture
+
+```mermaid
+graph TB
+    subgraph "External"
+        Client["🖥️ Client<br/>(Frontend/API Consumer)"]
+    end
+
+    subgraph "Docker Host"
+        subgraph "Network: docker-proxy-net"
+            API["📦 rce-api<br/>FastAPI Server<br/>Port 8000<br/><i>UID 1000 (appuser)</i>"]
+            Proxy["🔒 docker-socket-proxy<br/>Restricted Docker API<br/>Port 2375"]
+        end
+
+        Socket[("🐳 Docker Socket<br/>/var/run/docker.sock")]
+        Volume[("💾 Named Volume<br/>vbase-code-files")]
+
+        subgraph "Runner Containers (ephemeral)"
+            Python["🐍 python-runner<br/><i>UID 1001</i>"]
+            Node["📗 node-runner<br/><i>UID 1001</i>"]
+            C["⚙️ c-runner<br/><i>UID 1001</i>"]
+            Cpp["⚙️ cpp-runner<br/><i>UID 1001</i>"]
+            Java["☕ java-runner<br/><i>UID 1001</i>"]
+        end
+    end
+
+    Client -->|"HTTPS :8000<br/>X-API-Key header"| API
+    API -->|"TCP :2375<br/>Create containers"| Proxy
+    Proxy -->|"Read-only mount"| Socket
+    API -->|"Read/Write"| Volume
+    Volume -->|"Read-only mount"| Python
+    Volume -->|"Read-only mount"| Node
+    Volume -->|"Read-only mount"| C
+    Volume -->|"Read-only mount"| Cpp
+    Volume -->|"Read-only mount"| Java
+
+    classDef secure fill:#d4edda,stroke:#28a745
+    classDef ephemeral fill:#fff3cd,stroke:#ffc107
+    classDef external fill:#cce5ff,stroke:#004085
+
+    class Proxy,API secure
+    class Python,Node,C,Cpp,Java ephemeral
+    class Client external
+```
+
+### Code Execution Pipeline
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant API as rce-api<br/>(FastAPI)
+    participant Semaphore as Semaphore<br/>(Concurrency Limit)
+    participant Volume as Named Volume<br/>(vbase-code-files)
+    participant Proxy as docker-socket-proxy
+    participant Docker as Docker Daemon
+    participant Runner as Runner Container<br/>(python/node/etc)
+
+    Client->>+API: POST /api/v2/execute<br/>{language, files, ...}
+
+    Note over API: Validate API Key
+    alt Invalid/Missing Key
+        API-->>Client: 401/403 Unauthorized
+    end
+
+    Note over API: Validate Request<br/>(language, files)
+    alt Invalid Request
+        API-->>Client: 400 Bad Request
+    end
+
+    API->>+Semaphore: Acquire slot
+    Note over Semaphore: Wait if at max<br/>concurrent jobs
+
+    Semaphore-->>-API: Slot acquired
+
+    rect rgb(232, 245, 233)
+        Note over API,Volume: File Preparation Phase
+        API->>Volume: Create temp dir<br/>/tmp/vbase-rce/exec-{id}/
+        API->>Volume: Write code files<br/>chmod 755 dir, 644 files
+        API->>Volume: fsync() to ensure<br/>files are written
+    end
+
+    rect rgb(227, 242, 253)
+        Note over API,Runner: Container Execution Phase
+        API->>+Proxy: Create container request
+        Note over Proxy: Validate allowed<br/>Docker API calls
+        Proxy->>+Docker: Create container
+
+        Note over Docker: Apply security constraints:<br/>• mem_limit: 128m<br/>• network_disabled: true<br/>• read_only: true<br/>• cap_drop: ALL<br/>• pids_limit: 64
+
+        Docker->>+Runner: Start container
+        Note over Runner: Mount volume read-only<br/>at /code-volume/
+
+        Runner->>Runner: Execute code<br/>python/node/gcc/java
+
+        alt Timeout Exceeded
+            Docker->>Runner: SIGKILL
+            Runner-->>Docker: Exit 137
+        end
+
+        alt Memory Exceeded
+            Docker->>Runner: OOM Kill
+            Runner-->>Docker: Exit 137 + OOMKilled flag
+        end
+
+        Runner-->>-Docker: Exit code + stdout/stderr
+        Docker-->>-Proxy: Container result
+        Proxy-->>-API: Execution result
+    end
+
+    rect rgb(255, 243, 224)
+        Note over API,Volume: Cleanup Phase
+        API->>Docker: Remove container (force)
+        API->>Volume: Delete temp directory
+    end
+
+    API->>Semaphore: Release slot
+
+    API-->>-Client: 200 OK<br/>{stdout, stderr, code, signal}
+```
+
+### Security Layers
+
+```mermaid
+graph LR
+    subgraph "Layer 1: Network"
+        A1["🔐 API Key Auth"]
+        A2["🚫 Network Disabled<br/>(runners)"]
+    end
+
+    subgraph "Layer 2: Access Control"
+        B1["🔒 Socket Proxy<br/>Limited Docker API"]
+        B2["👤 Non-root Users<br/>UID 1000/1001"]
+        B3["🚦 Concurrency Limit"]
+    end
+
+    subgraph "Layer 3: Container Isolation"
+        C1["📦 Read-only rootfs"]
+        C2["🧠 Memory Limit"]
+        C3["⏱️ Timeout"]
+        C4["🔢 PID Limit"]
+        C5["🛡️ Cap Drop ALL"]
+        C6["🔐 No New Privileges"]
+    end
+
+    subgraph "Layer 4: Code Safety"
+        D1["📝 Command as List<br/>(no shell injection)"]
+        D2["📁 World-readable files<br/>(cross-UID access)"]
+        D3["🗑️ Temp file cleanup"]
+    end
+
+    A1 --> B1
+    A2 --> C1
+    B1 --> C1
+    B2 --> C5
+    B3 --> C2
+    C1 --> D1
+    C5 --> D2
+    C6 --> D3
+
+    style A1 fill:#d4edda
+    style B1 fill:#d4edda
+    style C5 fill:#d4edda
+    style D1 fill:#d4edda
+```
+
+### Container Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> RequestReceived: POST /api/v2/execute
+
+    RequestReceived --> Validating: Parse JSON
+
+    Validating --> Rejected: Invalid request
+    Rejected --> [*]: 400 Bad Request
+
+    Validating --> WaitingForSlot: Request valid
+
+    WaitingForSlot --> PreparingFiles: Semaphore acquired
+    Note right of WaitingForSlot: Blocks if MAX_CONCURRENT_JOBS reached
+
+    PreparingFiles --> CreatingContainer: Files written to volume
+    Note right of PreparingFiles: chmod 755/644 for cross-UID access
+
+    CreatingContainer --> Running: Container started
+    Note right of CreatingContainer: Security constraints applied
+
+    Running --> Completed: Normal exit
+    Running --> TimedOut: Timeout exceeded
+    Running --> OOMKilled: Memory exceeded
+    Running --> Crashed: Runtime error
+
+    Completed --> CleaningUp: Capture stdout/stderr
+    TimedOut --> CleaningUp: SIGKILL sent
+    OOMKilled --> CleaningUp: OOM flag set
+    Crashed --> CleaningUp: Error captured
+
+    CleaningUp --> [*]: Return response
+    Note right of CleaningUp: Remove container, delete temp files
+```
 
 ## License
 

@@ -19,6 +19,13 @@ from models import ExecuteRequest, ExecuteResponse, File, FileEncoding, RunResul
 # Maximum concurrent code executions (configurable via environment)
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
 
+# Base path for code files - must be within a shared volume
+# When running in Docker, this should be set to the volume mount path
+CODE_FILES_PATH = os.getenv("CODE_FILES_PATH", "/tmp/vbase-rce")
+
+# Docker volume name for sharing code files (used when CODE_FILES_PATH is set)
+CODE_FILES_VOLUME = os.getenv("CODE_FILES_VOLUME", "vbase-rce_vbase-code-files")
+
 
 class ExecutionError(Exception):
     """Custom exception for execution errors"""
@@ -41,6 +48,9 @@ class CodeExecutor:
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
         # Thread pool for running blocking Docker operations
         self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS)
+
+        # Ensure code files directory exists
+        os.makedirs(CODE_FILES_PATH, exist_ok=True)
 
     def _decode_file_content(self, file: File) -> str:
         """Decode file content based on encoding"""
@@ -74,8 +84,16 @@ class CodeExecutor:
     def _prepare_code_files(
         self, files: list[File], runtime: RuntimeConfig, temp_dir: str
     ) -> str:
-        """Write code files to temp directory, return main file path"""
+        """Write code files to temp directory, return main file path.
+
+        Files are created with world-readable permissions (0o755 for directory,
+        0o644 for files) so that runner containers can read them regardless of
+        which user they run as.
+        """
         main_file = "main"
+
+        # Make the temp directory world-readable/executable so runners can access it
+        os.chmod(temp_dir, 0o755)
 
         for i, file in enumerate(files):
             content = self._decode_file_content(file)
@@ -84,9 +102,21 @@ class CodeExecutor:
 
             with open(filepath, "w") as f:
                 f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Make file world-readable
+            os.chmod(filepath, 0o644)
 
             if i == 0:
                 main_file = filename
+
+        # Sync the directory to ensure all file metadata is written
+        dir_fd = os.open(temp_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
         return main_file
 
@@ -104,7 +134,8 @@ class CodeExecutor:
         result = []
         for part in cmd_template:
             if part == "{file}":
-                result.append(f"/code/{filename}")
+                # Use relative path since working_dir is set to the code directory
+                result.append(filename)
             elif part == "{classname}":
                 classname = (
                     self._extract_java_classname(content)
@@ -165,12 +196,24 @@ class CodeExecutor:
         container = None
 
         try:
+            # Get the relative path within the shared volume
+            # temp_dir is like /tmp/vbase-rce/exec-abc123, we need just the subdir name
+            subdir_name = os.path.basename(temp_dir)
+
+            # Use Docker named volume
+            # The volume is mounted at CODE_FILES_PATH in the API container
+            # For runner containers, we mount the same volume and use subpath
+            volume_config = {CODE_FILES_VOLUME: {"bind": "/code-volume", "mode": "ro"}}
+
+            # Working directory is the subdirectory within the volume
+            working_dir = f"/code-volume/{subdir_name}"
+
             # Prepare container configuration with security constraints
             container_config = {
                 "image": image,
-                "command": command,  # Pass command list directly - no shell
-                "volumes": {temp_dir: {"bind": "/code", "mode": "ro"}},
-                "working_dir": "/code",
+                "command": command,  # Pass command list directly
+                "volumes": volume_config,
+                "working_dir": working_dir,
                 "user": self.security.user,
                 "detach": True,
                 "stdin_open": bool(stdin),
@@ -306,7 +349,10 @@ class CodeExecutor:
 
         compile_result = None
 
-        with tempfile.TemporaryDirectory(prefix="vbase-rce-") as temp_dir:
+        # Use shared volume path for temp files
+        with tempfile.TemporaryDirectory(
+            prefix="exec-", dir=CODE_FILES_PATH
+        ) as temp_dir:
             # Write code files
             main_file = self._prepare_code_files(request.files, runtime, temp_dir)
             main_content = self._decode_file_content(request.files[0])
