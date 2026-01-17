@@ -4,7 +4,6 @@ A lightweight, secure Remote Code Execution (RCE) engine for VBase
 
 ## Features
 
-- **Piston API v2 Compatible**: Drop-in replacement for Piston API
 - **Multiple Language Support**: Python, JavaScript (Node.js), C, C++, Java
 - **Lightweight**: Alpine-based runner containers
 - **Secure by Design**: Defense-in-depth with multiple security layers
