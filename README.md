@@ -132,6 +132,36 @@ Each code execution runs in an isolated Docker container with:
 - **Process Limit**: Max 64 processes
 - **Capabilities**: All dropped
 - **Privileges**: No new privileges allowed
+- **Docker Socket Proxy**: API accesses Docker through a restricted proxy
+- **API Key Authentication**: Optional API key protection for all endpoints
+
+## API Authentication
+
+The API supports optional API key authentication via the `X-API-Key` header.
+
+### Configuration
+
+1. Generate a secure API key:
+```bash
+openssl rand -hex 32
+```
+
+2. Add the key to your `.env` file:
+```bash
+VBASE_API_KEY=your-generated-key-here
+```
+
+3. Include the header in all API requests:
+```bash
+curl -X POST http://localhost:8000/api/v2/execute \
+  -H "X-API-Key: your-generated-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{"language": "python", "version": "3.12.0", "files": [{"content": "print(\"Hello!\")"}]}'
+```
+
+### Development Mode
+
+If `VBASE_API_KEY` is not set (empty), authentication is disabled. This is useful for local development.
 
 ## Project Structure
 

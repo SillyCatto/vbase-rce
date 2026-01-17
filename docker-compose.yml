@@ -1,4 +1,51 @@
 services:
+  # Docker Socket Proxy - Security layer for Docker socket access
+  # Only exposes the minimum required Docker API endpoints
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: vbase-docker-proxy
+    environment:
+      # Deny everything by default, only allow what we need
+      # General permissions
+      - LOG=1
+      - EVENTS=0
+      - PING=1
+      - VERSION=1
+      # Container operations (required for code execution)
+      - CONTAINERS=1
+      - IMAGES=1
+      # Deny dangerous operations
+      - AUTH=0
+      - SECRETS=0
+      - POST=1  # Needed for creating/starting containers
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EXEC=0
+      - GRPC=0
+      - NETWORKS=0
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - SYSTEM=0
+      - TASKS=0
+      - VOLUMES=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    # Limit resources
+    mem_limit: 64m
+    cpus: 0.25
+    # tmpfs for haproxy config (needed since the proxy writes to /tmp)
+    tmpfs:
+      - /tmp
+    # No network access needed except from rce-api
+    networks:
+      - docker-proxy-net
+
   # Main API server
   rce-api:
     build: ./api
@@ -6,19 +53,23 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Mount Docker socket to control containers on host
-      - /var/run/docker.sock:/var/run/docker.sock
       # Mount temp directory for code files (shared with runner containers)
       - /tmp:/tmp
     environment:
-      - DOCKER_HOST=unix:///var/run/docker.sock
+      # Connect to Docker through the proxy instead of direct socket
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      # API Key for authentication (leave empty to disable auth in dev mode)
+      - VBASE_API_KEY=${VBASE_API_KEY:-}
     restart: unless-stopped
     depends_on:
+      - docker-socket-proxy
       - python-runner
       - node-runner
       - c-runner
       - cpp-runner
       - java-runner
+    networks:
+      - docker-proxy-net
 
   # Runner images (built only, not run as services)
   python-runner:
@@ -45,3 +96,8 @@ services:
     build: ./runners/java
     image: vbase-java-runner
     command: ["echo", "Java runner image built"]
+
+# Network for API to communicate with Docker socket proxy
+networks:
+  docker-proxy-net:
+    driver: bridge

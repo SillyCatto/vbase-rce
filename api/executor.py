@@ -83,36 +83,74 @@ class CodeExecutor:
 
     def _build_command(
         self,
-        cmd_template: str,
+        cmd_template: list[str],
         filename: str,
         args: list[str],
         content: Optional[str] = None,
         runtime: Optional[RuntimeConfig] = None,
-    ) -> str:
-        """Build the command to execute"""
-        args_str = " ".join(f'"{arg}"' for arg in args) if args else ""
+    ) -> list[str]:
+        """
+        Build the command to execute as a list (prevents shell injection)
+        """
+        result = []
+        for part in cmd_template:
+            if part == "{file}":
+                result.append(f"/code/{filename}")
+            elif part == "{classname}":
+                classname = (
+                    self._extract_java_classname(content)
+                    if content and runtime and runtime.language == "java"
+                    else ""
+                )
+                if classname:
+                    result.append(classname)
+            else:
+                result.append(part)
 
-        cmd = cmd_template.format(
-            file=f"/code/{filename}",
-            args=args_str,
-            classname=self._extract_java_classname(content)
-            if content and runtime and runtime.language == "java"
-            else "",
-        )
+        # Append args directly as separate elements (safe, no shell interpretation)
+        if args:
+            result.extend(args)
 
-        return cmd.strip()
+        return result
+
+    def _shell_quote(self, arg: str) -> str:
+        """
+        Safely quote a string for shell usage.
+        Uses single quotes and escapes any single quotes within.
+        """
+        import shlex
+
+        return shlex.quote(arg)
+
+    def _build_shell_command_for_compiled(
+        self, compile_cmd: list[str], run_cmd: list[str]
+    ) -> list[str]:
+        """
+        Build a shell command for compiled languages that chains compile && run.
+        Each argument is properly quoted to prevent shell injection.
+        Returns a command list that uses sh -c with safely quoted arguments.
+        """
+        # Quote each argument safely
+        compile_str = " ".join(self._shell_quote(arg) for arg in compile_cmd)
+        run_str = " ".join(self._shell_quote(arg) for arg in run_cmd)
+
+        # Chain with && so run only happens if compile succeeds
+        combined = f"{compile_str} && {run_str}"
+
+        return ["/bin/sh", "-c", combined]
 
     def _run_container(
         self,
         image: str,
-        command: str,
+        command: list[str],
         temp_dir: str,
         stdin: str = "",
         timeout: int = 10,
         memory_limit: str = "128m",
     ) -> Tuple[str, str, int, Optional[str]]:
         """
-        Run a container with the given command and security constraints
+        Run a container with the given command and security constraints.
+        Command is passed as a list to prevent shell injection.
         Returns: (stdout, stderr, exit_code, signal)
         """
         container = None
@@ -121,7 +159,7 @@ class CodeExecutor:
             # Prepare container configuration with security constraints
             container_config = {
                 "image": image,
-                "command": ["/bin/sh", "-c", command],
+                "command": command,  # Pass command list directly - no shell
                 "volumes": {temp_dir: {"bind": "/code", "mode": "ro"}},
                 "working_dir": "/code",
                 "user": self.security.user,
@@ -256,10 +294,10 @@ class CodeExecutor:
 
             # Handle compiled languages - compile and run in same container
             if runtime.compiled and runtime.compile_cmd:
-                compile_cmd = self._build_command(
+                compile_cmd_list = self._build_command(
                     runtime.compile_cmd, main_file, [], main_content, runtime
                 )
-                run_cmd = self._build_command(
+                run_cmd_list = self._build_command(
                     runtime.run_cmd,
                     main_file,
                     request.args or [],
@@ -267,9 +305,11 @@ class CodeExecutor:
                     runtime,
                 )
 
-                # Combine compile and run: compile && run
-                # This way the binary stays in /tmp within the same container
-                combined_cmd = f"{compile_cmd} && {run_cmd}"
+                # For compiled languages, we need shell to chain compile && run
+                # Build the command safely by properly quoting each argument
+                combined_cmd = self._build_shell_command_for_compiled(
+                    compile_cmd_list, run_cmd_list
+                )
 
                 stdout, stderr, code, signal = self._run_container(
                     image=runtime.image,

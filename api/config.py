@@ -16,8 +16,10 @@ class RuntimeConfig:
     image: str
     extension: str
     compiled: bool = False
-    compile_cmd: Optional[str] = None
-    run_cmd: str = ""
+    # Commands as lists to prevent shell injection
+    # Use {file}, {args}, {classname} as placeholders
+    compile_cmd: Optional[List[str]] = None
+    run_cmd: List[str] = field(default_factory=list)
     runtime: Optional[str] = None
 
 
@@ -67,7 +69,7 @@ RUNTIMES: List[RuntimeConfig] = [
         image="vbase-python-runner",
         extension=".py",
         compiled=False,
-        run_cmd="python3 {file} {args}",
+        run_cmd=["python3", "{file}"],
     ),
     RuntimeConfig(
         language="javascript",
@@ -77,7 +79,7 @@ RUNTIMES: List[RuntimeConfig] = [
         extension=".js",
         compiled=False,
         runtime="node",
-        run_cmd="node {file} {args}",
+        run_cmd=["node", "{file}"],
     ),
     RuntimeConfig(
         language="c",
@@ -86,8 +88,8 @@ RUNTIMES: List[RuntimeConfig] = [
         image="vbase-c-runner",
         extension=".c",
         compiled=True,
-        compile_cmd="gcc -o /tmp/program {file} -lm",
-        run_cmd="/tmp/program {args}",
+        compile_cmd=["gcc", "-o", "/tmp/program", "{file}", "-lm"],
+        run_cmd=["/tmp/program"],
     ),
     RuntimeConfig(
         language="c++",
@@ -96,8 +98,8 @@ RUNTIMES: List[RuntimeConfig] = [
         image="vbase-cpp-runner",
         extension=".cpp",
         compiled=True,
-        compile_cmd="g++ -o /tmp/program {file} -lm",
-        run_cmd="/tmp/program {args}",
+        compile_cmd=["g++", "-o", "/tmp/program", "{file}", "-lm"],
+        run_cmd=["/tmp/program"],
     ),
     RuntimeConfig(
         language="java",
@@ -106,8 +108,8 @@ RUNTIMES: List[RuntimeConfig] = [
         image="vbase-java-runner",
         extension=".java",
         compiled=True,
-        compile_cmd="javac -d /tmp {file}",
-        run_cmd="java -cp /tmp {classname} {args}",
+        compile_cmd=["javac", "-d", "/tmp", "{file}"],
+        run_cmd=["java", "-cp", "/tmp", "{classname}"],
     ),
 ]
 

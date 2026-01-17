@@ -2,16 +2,48 @@
 vbase-rce API - Remote Code Execution Engine
 """
 
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import docker
 import docker.errors
 from config import get_all_runtimes, get_runtime_by_language
+from dotenv import load_dotenv
 from executor import CodeExecutor, ExecutionError
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from models import ErrorResponse, ExecuteRequest, ExecuteResponse, Runtime
+
+load_dotenv()
+FRONTEND_URL = os.getenv("NEXT_DEPLOYED_FRONTEND_URL")
+VBASE_API_KEY = os.getenv("VBASE_API_KEY")
+
+# API Key security
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(api_key_header)) -> str:
+    """
+    Verify the API key from the X-API-Key header.
+    If VBASE_API_KEY is not set, authentication is disabled (development mode).
+    """
+    # If no API key is configured, skip authentication (development mode)
+    if not VBASE_API_KEY:
+        return "dev-mode"
+
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Missing API key. Provide X-API-Key header."},
+        )
+
+    if api_key != VBASE_API_KEY:
+        raise HTTPException(status_code=403, detail={"message": "Invalid API key"})
+
+    return api_key
+
 
 # Initialize Docker client and executor
 docker_client: Optional[docker.DockerClient] = None
@@ -53,7 +85,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="vbase-rce",
-    description="Remote Code Execution Engine - Piston API v2 Compatible",
+    description="VBase Remote Code Execution Engine",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -61,7 +93,7 @@ app = FastAPI(
 # CORS middleware for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", f"{FRONTEND_URL}"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,11 +107,8 @@ async def health_check():
     return {"status": "ok"}
 
 
-# --- Piston API v2 Compatible Endpoints ---
-
-
 @app.get("/api/v2/runtimes", response_model=list[Runtime])
-async def list_runtimes():
+async def list_runtimes(_: str = Depends(verify_api_key)):
     """
     List all available runtimes
     Piston API v2 compatible
@@ -113,7 +142,7 @@ async def list_runtimes():
     response_model=ExecuteResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
-async def execute_code(request: ExecuteRequest):
+async def execute_code(request: ExecuteRequest, _: str = Depends(verify_api_key)):
     """
     Execute code in an isolated container
     Piston API v2 compatible
@@ -152,7 +181,7 @@ async def execute_code(request: ExecuteRequest):
 
 
 @app.get("/api/v2/runtimes/{language}")
-async def get_runtime(language: str):
+async def get_runtime(language: str, _: str = Depends(verify_api_key)):
     """Get details for a specific runtime"""
     runtime = get_runtime_by_language(language)
     if not runtime:
