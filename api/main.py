@@ -11,24 +11,36 @@ import docker.errors
 from config import get_all_runtimes, get_runtime_by_language
 from dotenv import load_dotenv
 from executor import CodeExecutor, ExecutionError
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from models import ErrorResponse, ExecuteRequest, ExecuteResponse, Runtime
 
 load_dotenv()
-FRONTEND_URL = os.getenv("NEXT_DEPLOYED_FRONTEND_URL")
+FRONTEND_URL = os.getenv("NEXT_DEPLOYED_FRONTEND_URL", "")
 VBASE_API_KEY = os.getenv("VBASE_API_KEY")
+
+# Build CORS allowed origins list (strip trailing slashes)
+CORS_ORIGINS = ["http://localhost:3000"]
+if FRONTEND_URL:
+    CORS_ORIGINS.append(FRONTEND_URL.rstrip("/"))
 
 # API Key security
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-async def verify_api_key(api_key: str = Security(api_key_header)) -> str:
+async def verify_api_key(
+    request: Request, api_key: str = Security(api_key_header)
+) -> str:
     """
     Verify the API key from the X-API-Key header.
     If VBASE_API_KEY is not set, authentication is disabled (development mode).
+    OPTIONS requests (CORS preflight) are allowed through without auth.
     """
+    # Allow CORS preflight requests through without auth
+    if request.method == "OPTIONS":
+        return "preflight"
+
     # If no API key is configured, skip authentication (development mode)
     if not VBASE_API_KEY:
         return "dev-mode"
@@ -90,10 +102,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware for development
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", f"{FRONTEND_URL}"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
